@@ -26,6 +26,8 @@
 #include <htc_debug/stability/htc_report_meminfo.h>
 
 
+#include "internal.h"
+
 /*
  * Lock order:
  *   1. slab_mutex (Global Mutex)
@@ -435,7 +437,7 @@ static void set_track(struct kmem_cache *s, void *object,
 		trace.skip = 3;
 		save_stack_trace(&trace);
 
-		
+
 		if (trace.nr_entries != 0 &&
 		    trace.entries[trace.nr_entries - 1] == ULONG_MAX)
 			trace.nr_entries--;
@@ -562,7 +564,7 @@ static void print_trailer(struct kmem_cache *s, struct page *page, u8 *p)
 		off += 2 * sizeof(struct track);
 
 	if (off != s->size)
-		
+
 		print_section("Padding ", p + off, s->size - off);
 
 	dump_stack();
@@ -675,11 +677,11 @@ static int check_pad_bytes(struct kmem_cache *s, struct page *page, u8 *p)
 	unsigned long off = s->inuse;	
 
 	if (s->offset)
-		
+
 		off += sizeof(void *);
 
 	if (s->flags & SLAB_STORE_USER)
-		
+
 		off += 2 * sizeof(struct track);
 
 	if (s->size == off)
@@ -750,7 +752,7 @@ static int check_object(struct kmem_cache *s, struct page *page,
 	if (!s->offset && val == SLUB_RED_ACTIVE)
 		return 1;
 
-	
+
 	if (!check_valid_pointer(s, page, get_freepointer(s, p))) {
 		object_err(s, page, p, "Freepointer corrupt");
 #ifndef CONFIG_SLUB_LIGHT_WEIGHT_DEBUG_ON
@@ -783,7 +785,7 @@ static int check_slab(struct kmem_cache *s, struct page *page)
 			s->name, page->inuse, page->objects);
 		return 0;
 	}
-	
+
 	slab_pad_check(s, page);
 	return 1;
 }
@@ -967,7 +969,7 @@ static noinline int alloc_debug_processing(struct kmem_cache *s, struct page *pa
 	if (!check_object(s, page, object, SLUB_RED_INACTIVE))
 		goto bad;
 
-	
+
 	if (s->flags & SLAB_STORE_USER)
 		set_track(s, object, TRACK_ALLOC, addr);
 	trace(s, page, object, 1);
@@ -1243,6 +1245,8 @@ static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
 	inc_slabs_node(s, page_to_nid(page), page->objects);
 	page->slab = s;
 	__SetPageSlab(page);
+	if (page->pfmemalloc)
+		SetPageSlabPfmemalloc(page);
 
 	start = page_address(page);
 
@@ -1286,6 +1290,7 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE,
 		-pages);
 
+	__ClearPageSlabPfmemalloc(page);
 	__ClearPageSlab(page);
 	reset_page_mapcount(page);
 	if (current->reclaim_state)
@@ -1591,7 +1596,7 @@ redo:
 	old.counters = page->counters;
 	VM_BUG_ON(!old.frozen);
 
-	
+
 	new.counters = old.counters;
 	if (freelist) {
 		new.inuse--;
@@ -1910,6 +1915,14 @@ static inline void *new_slab_objects(struct kmem_cache *s, gfp_t flags,
 	return freelist;
 }
 
+static inline bool pfmemalloc_match(struct page *page, gfp_t gfpflags)
+{
+	if (unlikely(PageSlabPfmemalloc(page)))
+		return gfp_pfmemalloc_allowed(gfpflags);
+
+	return true;
+}
+
 /*
  * Check the page->freelist of a page and either transfer the freelist to the per cpu freelist
  * or deactivate the page.
@@ -1969,6 +1982,18 @@ redo:
 		goto new_slab;
 	}
 
+	/*
+	 * By rights, we should be searching for a slab page that was
+	 * PFMEMALLOC but right now, we are losing the pfmemalloc
+	 * information when the page leaves the per-cpu allocator
+	 */
+	if (unlikely(!pfmemalloc_match(page, gfpflags))) {
+		deactivate_slab(s, page, c->freelist);
+		c->page = NULL;
+		c->freelist = NULL;
+		goto new_slab;
+	}
+
 	/* must check again c->freelist in case of cpu migration or IRQ */
 	freelist = c->freelist;
 	if (freelist)
@@ -2019,11 +2044,11 @@ new_slab:
 	}
 
 	page = c->page;
-	if (likely(!kmem_cache_debug(s)))
+	if (likely(!kmem_cache_debug(s) && pfmemalloc_match(page, gfpflags)))
 		goto load_freelist;
 
 	/* Only entered in the debug case */
-	if (!alloc_debug_processing(s, page, freelist, addr))
+	if (kmem_cache_debug(s) && !alloc_debug_processing(s, page, freelist, addr))
 		goto new_slab;	/* Slab failed checks. Next slab needed */
 
 	deactivate_slab(s, page, get_freepointer(s, freelist));
@@ -2054,7 +2079,6 @@ redo:
 	object = c->freelist;
 	page = c->page;
 	if (unlikely(!object || !node_match(page, node)))
-
 		object = __slab_alloc(s, gfpflags, node, addr, c);
 
 	else {
@@ -2215,7 +2239,7 @@ slab_empty:
 		remove_partial(n, page);
 		stat(s, FREE_REMOVE_PARTIAL);
 	} else
-		
+
 		remove_full(s, page);
 
 	spin_unlock_irqrestore(&n->list_lock, flags);
@@ -2580,7 +2604,7 @@ static int kmem_cache_open(struct kmem_cache *s,
 #if defined(CONFIG_HAVE_CMPXCHG_DOUBLE) && \
     defined(CONFIG_HAVE_ALIGNED_STRUCT_PAGE)
 	if (system_has_cmpxchg_double() && (s->flags & SLAB_DEBUG_FLAGS) == 0)
-		
+
 		s->flags |= __CMPXCHG_DOUBLE;
 #endif
 
@@ -2671,7 +2695,7 @@ static inline int kmem_cache_close(struct kmem_cache *s)
 
 	flush_all(s);
 	free_percpu(s->cpu_slab);
-	
+
 	for_each_node_state(node, N_NORMAL_MEMORY) {
 		struct kmem_cache_node *n = get_node(s, node);
 
@@ -2922,7 +2946,7 @@ bool verify_mem_not_deleted(const void *x)
 
 	page = virt_to_head_page(x);
 	if (unlikely(!PageSlab(page))) {
-		
+
 		rv = true;
 		goto out_unlock;
 	}
@@ -3002,7 +3026,7 @@ int kmem_cache_shrink(struct kmem_cache *s)
 
 		spin_unlock_irqrestore(&n->list_lock, flags);
 
-		
+
 		list_for_each_entry_safe(page, t, slabs_by_inuse, lru)
 			discard_slab(s, page);
 	}
@@ -3150,7 +3174,7 @@ void __init kmem_cache_init(void)
 	kmem_size = offsetof(struct kmem_cache, node) +
 				nr_node_ids * sizeof(struct kmem_cache_node *);
 
-	
+
 	kmalloc_size = ALIGN(kmem_size, cache_line_size());
 	order = get_order(2 * kmalloc_size);
 	kmem_cache = (void *)__get_free_pages(GFP_NOWAIT, order);
@@ -3163,7 +3187,7 @@ void __init kmem_cache_init(void)
 
 	hotplug_memory_notifier(slab_memory_callback, SLAB_CALLBACK_PRI);
 
-	
+
 	slab_state = PARTIAL;
 
 	temp_kmem_cache = kmem_cache;
@@ -3182,10 +3206,10 @@ void __init kmem_cache_init(void)
 	caches++;
 	kmem_cache_bootstrap_fixup(kmem_cache);
 	caches++;
-	
+
 	free_pages((unsigned long)temp_kmem_cache, order);
 
-	
+
 
 	BUILD_BUG_ON(KMALLOC_MIN_SIZE > 256 ||
 		(KMALLOC_MIN_SIZE & (KMALLOC_MIN_SIZE - 1)));
@@ -3205,7 +3229,7 @@ void __init kmem_cache_init(void)
 			size_index[size_index_elem(i)] = 8;
 	}
 
-	
+
 	if (KMALLOC_MIN_SIZE <= 32) {
 		kmalloc_caches[1] = create_kmalloc_cache("kmalloc-96", 96, 0);
 		caches++;
@@ -3223,7 +3247,7 @@ void __init kmem_cache_init(void)
 
 	slab_state = UP;
 
-	
+
 	if (KMALLOC_MIN_SIZE <= 32) {
 		kmalloc_caches[1]->name = kstrdup(kmalloc_caches[1]->name, GFP_NOWAIT);
 		BUG_ON(!kmalloc_caches[1]->name);
@@ -3419,7 +3443,7 @@ void *__kmalloc_track_caller(size_t size, gfp_t gfpflags, unsigned long caller)
 
 	ret = slab_alloc(s, gfpflags, NUMA_NO_NODE, caller);
 
-	
+
 	trace_kmalloc(caller, ret, size, s->size, gfpflags);
 
 	return ret;
@@ -3449,7 +3473,7 @@ void *__kmalloc_node_track_caller(size_t size, gfp_t gfpflags,
 
 	ret = slab_alloc(s, gfpflags, node, caller);
 
-	
+
 	trace_kmalloc_node(caller, ret, size, s->size, gfpflags, node);
 
 	return ret;
@@ -3479,7 +3503,7 @@ static int validate_slab(struct kmem_cache *s, struct page *page,
 			!on_freelist(s, page, NULL))
 		return 0;
 
-	
+
 	bitmap_zero(map, page->objects);
 
 	get_map(s, page, map);
@@ -3703,7 +3727,7 @@ static int list_locations(struct kmem_cache *s, char *buf,
 		kfree(map);
 		return sprintf(buf, "Out of memory\n");
 	}
-	
+
 	flush_all(s);
 
 	for_each_node_state(node, N_NORMAL_MEMORY) {
@@ -3795,7 +3819,7 @@ static void resiliency_test(void)
 
 	validate_slab_cache(kmalloc_caches[4]);
 
-	
+
 	p = kzalloc(32, GFP_KERNEL);
 	p[32 + sizeof(void *)] = 0x34;
 	printk(KERN_ERR "\n2. kmalloc-32: Clobber next pointer/next slab"
@@ -4680,7 +4704,7 @@ static int sysfs_slab_add(struct kmem_cache *s)
 	}
 	kobject_uevent(&s->kobj, KOBJ_ADD);
 	if (!unmergeable) {
-		
+
 		sysfs_slab_alias(s, s->name);
 		kfree(name);
 	}
