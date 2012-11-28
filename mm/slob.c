@@ -144,7 +144,6 @@ static inline void clear_slob_page_free(struct page *sp)
 
 #define SLOB_UNIT sizeof(slob_t)
 #define SLOB_UNITS(size) (((size) + SLOB_UNIT - 1)/SLOB_UNIT)
-#define SLOB_ALIGN L1_CACHE_BYTES
 
 struct slob_rcu {
 	struct rcu_head head;
@@ -280,7 +279,7 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 		slob_list = &free_slob_large;
 
 	spin_lock_irqsave(&slob_lock, flags);
-	
+
 	list_for_each_entry(sp, slob_list, list) {
 #ifdef CONFIG_NUMA
 		/*
@@ -290,11 +289,11 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 		if (node != NUMA_NO_NODE && page_to_nid(sp) != node)
 			continue;
 #endif
-		
+
 		if (sp->units < SLOB_UNITS(size))
 			continue;
 
-		
+
 		prev = sp->list.prev;
 		b = slob_page_alloc(sp, size, align);
 		if (!b)
@@ -307,7 +306,7 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 	}
 	spin_unlock_irqrestore(&slob_lock, flags);
 
-	
+
 	if (!b) {
 		b = slob_new_pages(gfp & ~__GFP_ZERO, 0, node);
 		if (!b)
@@ -348,7 +347,7 @@ static void slob_free(void *block, int size)
 	spin_lock_irqsave(&slob_lock, flags);
 
 	if (sp->units + units == SLOB_UNITS(PAGE_SIZE)) {
-		
+
 		if (slob_page_free(sp))
 			clear_slob_page_free(sp);
 		spin_unlock_irqrestore(&slob_lock, flags);
@@ -359,7 +358,7 @@ static void slob_free(void *block, int size)
 	}
 
 	if (!slob_page_free(sp)) {
-		
+
 		sp->units = units;
 		sp->freelist = b;
 		set_slob(b, units,
@@ -509,25 +508,13 @@ size_t ksize(const void *block)
 }
 EXPORT_SYMBOL(ksize);
 
-int __kmem_cache_create(struct kmem_cache *c, const char *name, size_t size,
-	size_t align, unsigned long flags, void (*ctor)(void *))
+int __kmem_cache_create(struct kmem_cache *c, unsigned long flags)
 {
-	c->name = name;
-	c->size = size;
 	if (flags & SLAB_DESTROY_BY_RCU) {
 		/* leave room for rcu footer at the end of object */
 		c->size += sizeof(struct slob_rcu);
 	}
 	c->flags = flags;
-	c->ctor = ctor;
-	/* ignore alignment unless it's forced */
-	c->align = (flags & SLAB_HWCACHE_ALIGN) ? SLOB_ALIGN : 0;
-	if (c->align < ARCH_SLAB_MINALIGN)
-		c->align = ARCH_SLAB_MINALIGN;
-	if (c->align < align)
-		c->align = align;
-
-	c->refcount = 1;
 	return 0;
 }
 

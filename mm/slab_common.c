@@ -73,6 +73,34 @@ static inline int kmem_cache_sanity_check(const char *name, size_t size)
 #endif
 
 /*
+ * Figure out what the alignment of the objects will be given a set of
+ * flags, a user specified alignment and the size of the objects.
+ */
+unsigned long calculate_alignment(unsigned long flags,
+		unsigned long align, unsigned long size)
+{
+	/*
+	 * If the user wants hardware cache aligned objects then follow that
+	 * suggestion if the object is sufficiently large.
+	 *
+	 * The hardware cache alignment cannot override the specified
+	 * alignment though. If that is greater then use it.
+	 */
+	if (flags & SLAB_HWCACHE_ALIGN) {
+		unsigned long ralign = cache_line_size();
+		while (size <= ralign / 2)
+			ralign /= 2;
+		align = max(align, ralign);
+	}
+
+	if (align < ARCH_SLAB_MINALIGN)
+		align = ARCH_SLAB_MINALIGN;
+
+	return ALIGN(align, sizeof(void *));
+}
+
+
+/*
  * kmem_cache_create - Create a cache.
  * @name: A string which is used in /proc/slabinfo to identify this cache.
  * @size: The size of objects to be created in this cache.
@@ -102,7 +130,6 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size, size_t align
 {
 	struct kmem_cache *s = NULL;
 	int err = 0;
-	char *n;
 
 	get_online_cpus();
 	mutex_lock(&slab_mutex);
@@ -118,32 +145,34 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size, size_t align
 	 */
 	flags &= CACHE_CREATE_MASK;
 
-	n = kstrdup(name, GFP_KERNEL);
-	if (!n) {
-		err = -ENOMEM;
-		goto out_locked;
-	}
-
 	s = __kmem_cache_alias(name, size, align, flags, ctor);
 	if (s)
 		goto out_locked;
 
 	s = kmem_cache_zalloc(kmem_cache, GFP_KERNEL);
 	if (s) {
-		err = __kmem_cache_create(s, n, size, align, flags, ctor);
-		if (!err)
-
-			list_add(&s->list, &slab_caches);
-
-		else {
-			kfree(n);
+		s->object_size = s->size = size;
+		s->align = calculate_alignment(flags, align, size);
+		s->ctor = ctor;
+		s->name = kstrdup(name, GFP_KERNEL);
+		if (!s->name) {
 			kmem_cache_free(kmem_cache, s);
+			err = -ENOMEM;
+			goto out_locked;
 		}
 
-	} else {
-		kfree(n);
+		err = __kmem_cache_create(s, flags);
+		if (!err) {
+
+			s->refcount = 1;
+			list_add(&s->list, &slab_caches);
+
+		} else {
+			kfree(s->name);
+			kmem_cache_free(kmem_cache, s);
+		}
+	} else
 		err = -ENOMEM;
-	}
 
 out_locked:
 	mutex_unlock(&slab_mutex);
@@ -210,7 +239,7 @@ void __init create_boot_cache(struct kmem_cache *s, const char *name, size_t siz
 
 	s->name = name;
 	s->size = s->object_size = size;
-	s->align = ARCH_KMALLOC_MINALIGN;
+	s->align = calculate_alignment(flags, ARCH_KMALLOC_MINALIGN, size);
 	err = __kmem_cache_create(s, flags);
 
 	if (err)
